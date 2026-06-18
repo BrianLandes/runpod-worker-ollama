@@ -1,0 +1,9 @@
+{
+    "input": {
+        "openai_route": "/v1/embeddings",
+        "openai_input": {
+            "model": "nomic-embed-text",
+            "input": "The quick brown fox jumps over the lazy dog"
+        }
+    }
+}

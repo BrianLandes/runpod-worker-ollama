@@ -73,6 +73,9 @@ class OllamaOpenAiEngine(OllamaEngine):
         elif job_input.openai_route in ["/v1/chat/completions", "/v1/completions"]:
             async for response in self._handle_chat_or_completion_request(openai_input, chat=job_input.openai_route == "/v1/chat/completions"):
                 yield response
+        elif job_input.openai_route == "/v1/embeddings":
+            async for response in self._handle_embeddings_request(openai_input):
+                yield response
         else:
             yield {"error": "Invalid route"}
 
@@ -82,6 +85,15 @@ class OllamaOpenAiEngine(OllamaEngine):
             # build a json response from the response object
             # SyncPage[Model](data=[Model(id='llama3.2:1b', created=1737206544, object='model', owned_by='library')], object='list')\n
             yield {"object": "list", "data": [model.to_dict() for model in response.data]} 
+        except Exception as e:
+            yield {"error": str(e)}
+
+    async def _handle_embeddings_request(self, openai_input):
+        try:
+            # Embeddings are non-streaming; the caller supplies "model" and "input"
+            # in openai_input, e.g. {"model": "nomic-embed-text", "input": "hello"}
+            response = client.embeddings.create(**openai_input)
+            yield response.to_dict()
         except Exception as e:
             yield {"error": str(e)}
 

@@ -22,6 +22,16 @@
         }
       },
       {
+        "key": "OLLAMA_EXTRA_MODELS",
+        "input": {
+          "name": "Extra Models",
+          "type": "string",
+          "description": "Comma-separated list of additional models to preload (e.g. nomic-embed-text,all-minilm)",
+          "default": "",
+          "advanced": false
+        }
+      },
+      {
         "key": "MAX_CONCURRENCY",
         "input": {
           "name": "Max Concurrency",

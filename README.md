@@ -9,9 +9,10 @@ A mounted volume will be automatically used.
 
 ## Environment variables
 
-| Variable Name       | Description                              | Default Value       |
-|---------------------|------------------------------------------|---------------------|
-| `OLLAMA_MODEL_NAME` | The name of the model to download        | NULL                |
+| Variable Name         | Description                                                                                | Default Value |
+|-----------------------|--------------------------------------------------------------------------------------------|---------------|
+| `OLLAMA_MODEL_NAME`   | The name of the model to download                                                          | NULL          |
+| `OLLAMA_EXTRA_MODELS` | Comma-separated list of additional models to preload (e.g. `nomic-embed-text,all-minilm`)  | NULL          |
 
 ## Test requests for runpod.io console
 
@@ -21,6 +22,25 @@ See the [test_inputs](./test_inputs) directory for example test requests.
 ## Streaming
 
 Streaming for openai requests are fully working.
+
+## Embeddings
+
+To generate embeddings, preload an embedding model (e.g. set `OLLAMA_EXTRA_MODELS=nomic-embed-text`)
+and send a request to the `/v1/embeddings` route:
+
+```json
+{
+    "input": {
+        "openai_route": "/v1/embeddings",
+        "openai_input": {
+            "model": "nomic-embed-text",
+            "input": "The quick brown fox jumps over the lazy dog"
+        }
+    }
+}
+```
+
+See [test_inputs/openai_embeddings.json](./test_inputs/openai_embeddings.json) for a runnable example.
 
 ## Preload model into the docker image
 
