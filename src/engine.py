@@ -18,8 +18,13 @@ class OllamaEngine:
         print ("OllamaEngine initialized")
 
     async def generate(self, job_input):
-        # Get model from OLLAMA_MODEL_NAME defauting to llama3.2:1b
-        model = os.getenv("OLLAMA_MODEL_NAME", "llama3.2:1b")
+        # The model is baked into the image and pinned via OLLAMA_MODEL_NAME (see Dockerfile),
+        # so this should always be set. If it isn't, the image was built/configured wrong —
+        # surface a clear error instead of silently serving a default that isn't installed.
+        model = os.getenv("OLLAMA_MODEL_NAME")
+        if not model:
+            yield {"error": "OLLAMA_MODEL_NAME is not set; it is baked into the image at build time."}
+            return
 
         # Depending if prompt is a string or a list, we need to handle it differently and send it to the OpenAI API
         if isinstance(job_input.llm_input, str):

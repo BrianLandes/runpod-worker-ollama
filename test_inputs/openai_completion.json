@@ -2,7 +2,7 @@
     "input": {
         "openai_route": "/v1/completions",
         "openai_input": {
-            "model": "llama3.2:1b",
+            "model": "hf.co/TheDrummer/Cydonia-24B-v4.3-GGUF:Q4_K_M",
             "prompt": "How are you?",
             "max_tokens": 60
         }
