@@ -54,6 +54,33 @@ RUN set -e; \
 # to the baked text model so the served model can't drift from what's in the image.
 ENV OLLAMA_MODEL_NAME=${TEXT_MODEL}
 
+# --- Context window ---
+# Ollama's default is 4096 tokens, far below this model's native 131072. A prompt
+# longer than the window is NOT rejected: Ollama keeps the TAIL and silently
+# discards the front, so the model answers confidently having never seen the
+# opening of its own prompt. Callers sending ~5.5k-token prompts were losing the
+# whole leading section that way.
+#
+# Not settable per request on the OpenAI-compatible route we serve — Ollama's
+# /v1/completions accepts and ignores unknown fields, so a caller-supplied
+# num_ctx is a no-op. The server-wide env var is the only knob.
+#
+# VRAM: the KV cache is preallocated at load, ~160 KiB/token for Cydonia-24B
+# (40 layers x 8 KV heads x 256 x 2 bytes), on top of ~13.9 GiB of weights.
+#   4096 -> +0.6 GiB (14.5 total)   8192 -> +1.25 GiB (15.2 total)
+#  16384 -> +2.5 GiB (16.4 total)  32768 -> +5.0 GiB (18.9 total)
+# 8192 clears the callers' largest prompts and still fits a 24 GB worker with
+# room to spare. Raising it much further needs the endpoint pinned to 24 GB GPUs.
+ENV OLLAMA_CONTEXT_LENGTH=8192
+
+# Ollama allocates OLLAMA_CONTEXT_LENGTH x OLLAMA_NUM_PARALLEL worth of KV cache
+# and picks the parallelism itself when unset (up to 4). Left to its own devices
+# that quietly multiplies the figures above by 4 — 8192 x 4 = 5 GiB of KV — which
+# is how raising the context turns into an out-of-memory on cold start. Pin it so
+# the memory math is predictable; override on the endpoint if you want
+# concurrency and have sized the GPU for it.
+ENV OLLAMA_NUM_PARALLEL=1
+
 # Set the working directory
 WORKDIR /work
 

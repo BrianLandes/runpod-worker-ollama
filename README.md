@@ -9,10 +9,24 @@ A mounted volume will be automatically used.
 
 ## Environment variables
 
-| Variable Name         | Description                                                                                | Default Value |
-|-----------------------|--------------------------------------------------------------------------------------------|---------------|
-| `OLLAMA_MODEL_NAME`   | The name of the model to download                                                          | NULL          |
-| `OLLAMA_EXTRA_MODELS` | Comma-separated list of additional models to preload (e.g. `nomic-embed-text,all-minilm`)  | NULL          |
+| Variable Name           | Description                                                                                | Default Value |
+|-------------------------|--------------------------------------------------------------------------------------------|---------------|
+| `OLLAMA_MODEL_NAME`     | The name of the model to download                                                          | NULL          |
+| `OLLAMA_EXTRA_MODELS`   | Comma-separated list of additional models to preload (e.g. `nomic-embed-text,all-minilm`)  | NULL          |
+| `OLLAMA_CONTEXT_LENGTH` | Context window in tokens. **Ollama's own default of 4096 silently discards the front of any longer prompt** rather than erroring, and this cannot be overridden per request on the OpenAI routes. Costs preallocated VRAM. | `8192`        |
+| `OLLAMA_NUM_PARALLEL`   | Ollama slots served concurrently. KV cache = context length × this, so raising it multiplies VRAM. Pinned for predictable memory. | `1`           |
+| `MAX_CONCURRENCY`       | Max concurrent requests the handler accepts                                                | `8`           |
+
+> This fork **bakes** the models into the image at build time (see [`Dockerfile`](./Dockerfile)),
+> so `OLLAMA_MODEL_NAME` / `OLLAMA_EXTRA_MODELS` are build-time `ARG`s rather than runtime
+> settings. See [DEPLOY.md](./DEPLOY.md) for the rebuild-and-roll-out flow and the VRAM tables.
+
+## Sampling parameters
+
+A simple `{"input": {"prompt": "...", "temperature": 0.1, "max_tokens": 512}}` job forwards its
+sampling params through to Ollama. `temperature`, `top_p`, `max_tokens`, `seed` and `stop` take
+effect; `top_k` and `repeat_penalty` are passed along but Ollama's OpenAI-compatible layer does
+not implement them (accepted and ignored). Before **0.1.1** every one of these was dropped.
 
 ## Test requests for runpod.io console
 

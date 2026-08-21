@@ -109,12 +109,56 @@ new tag.
 
 The model env vars are **gone** — both models are baked into the image at build time, and the
 default generation model is pinned in the image via `ENV OLLAMA_MODEL_NAME=${TEXT_MODEL}`
-([Dockerfile](./Dockerfile)). Only these remain, both optional:
+([Dockerfile](./Dockerfile)). These remain, all optional:
 
-| Variable              | Purpose                                                        | Example |
-|-----------------------|---------------------------------------------------------------|---------|
-| `MAX_CONCURRENCY`     | Max concurrent requests per worker (optional, default 8)      | `8`     |
-| `OLLAMA_NUM_PARALLEL` | Ollama parallel request setting (optional)                    | `4`     |
+| Variable                | Purpose                                                    | Example |
+|-------------------------|------------------------------------------------------------|---------|
+| `OLLAMA_CONTEXT_LENGTH` | Context window in tokens (image default **8192**)          | `8192`  |
+| `OLLAMA_NUM_PARALLEL`   | Ollama slots served concurrently (image default **1**)     | `1`     |
+| `MAX_CONCURRENCY`       | Max concurrent requests per worker (default 8)             | `8`     |
+
+### About `OLLAMA_CONTEXT_LENGTH` — read before changing it
+
+Ollama's own default is **4096**, and a prompt longer than the window is **not rejected**:
+Ollama keeps the **tail** and silently discards the front. The model then answers confidently
+having never seen the opening of its own prompt. If a caller puts its payload at the top of a
+long prompt — the story text, the source document, the data to extract from — that payload is
+exactly what disappears, and the only symptom is quietly wrong answers.
+
+This is *not* settable per request on the OpenAI-compatible routes this worker serves.
+Ollama's `/v1/completions` accepts unknown JSON fields and ignores them, so a caller-supplied
+`num_ctx` or `options` block is a silent no-op. **This env var is the only knob.**
+
+VRAM cost — the KV cache is preallocated at model load, so you pay it whether or not prompts
+are actually that long. For the baked Cydonia-24B (~13.9 GiB weights, ~160 KiB/token):
+
+| `OLLAMA_CONTEXT_LENGTH` | KV cache | Total VRAM | Fits 16 GB? | Fits 24 GB? |
+|---|---|---|---|---|
+| 4096      | 0.6 GiB      | 14.5 GiB     | marginal | yes |
+| **8192**  | **1.25 GiB** | **15.2 GiB** | **no**   | **yes** |
+| 16384     | 2.5 GiB      | 16.4 GiB     | no       | yes |
+| 32768     | 5.0 GiB      | 18.9 GiB     | no       | yes |
+
+> ⚠️ **These figures are multiplied by `OLLAMA_NUM_PARALLEL`.** Ollama picks the parallelism
+> itself when unset (up to 4), so leaving it blank silently quadruples the KV cache —
+> 8192 × 4 = 5 GiB — which is the usual reason raising the context turns into an
+> out-of-memory on cold start. The image pins it to `1`; raise it only if the GPU is sized for it.
+
+> ⚠️ **GPU tier.** [`hub.json`](./.runpod/hub.json) no longer offers `AMPERE_16`: at 8192 the
+> model needs ~15.2 GiB and a 16 GB card cannot hold it without spilling layers to CPU, which is
+> drastically slower rather than a clean failure. Keep the endpoint on **24 GB** GPUs
+> (`AMPERE_24`, `ADA_24`). To run on 16 GB, drop the context back to 4096 — and accept that
+> prompts over 4096 lose their front.
+
+### Sampling parameters (worker ≥ 0.1.1)
+
+The worker now forwards `max_tokens`, `temperature`, `top_p`, `seed`, `stop` and friends from
+the job input through to Ollama. **Before 0.1.1 it discarded all of them**, keeping only
+`prompt` — so callers asking for `temperature: 0.1` silently got the model default, and
+`max_tokens` never applied (measured: 1,908 generated tokens against a requested cap of 12).
+
+`top_k` and `repeat_penalty` are forwarded via `extra_body` but Ollama's OpenAI-compat layer
+does not implement them — accepted and ignored, not an error. Use `temperature` / `top_p`.
 
 > **Remove** any `OLLAMA_MODEL_NAME` / `OLLAMA_EXTRA_MODELS` left over from an older deploy —
 > they no longer do anything at runtime and just mislead.

@@ -7,10 +7,20 @@
   "config": {
     "runsOn": "GPU",
     "gpuCount": 1,
-    "gpuIds": "AMPERE_16,AMPERE_24,ADA_24",
+    "gpuIds": "AMPERE_24,ADA_24",
     "containerDiskInGb": 20,
     "presets": [],
     "env": [
+      {
+        "key": "OLLAMA_CONTEXT_LENGTH",
+        "input": {
+          "name": "Context Length",
+          "type": "string",
+          "description": "Tokens of context (prompt + generation). Ollama's own default is 4096 and it silently DISCARDS the front of any longer prompt rather than erroring. Image default is 8192. Each 1024 tokens costs ~0.16 GiB of preallocated VRAM on top of ~13.9 GiB of weights, multiplied by OLLAMA_NUM_PARALLEL.",
+          "default": "8192",
+          "advanced": true
+        }
+      },
       {
         "key": "MAX_CONCURRENCY",
         "input": {
@@ -26,8 +36,8 @@
         "input": {
           "name": "Parallel Requests",
           "type": "string",
-          "description": "Maximum number of concurrent requests to handle (default: 4 or 1)",
-          "default": "",
+          "description": "Ollama slots served concurrently. KV cache is OLLAMA_CONTEXT_LENGTH x this, so raising it multiplies VRAM. Image pins it to 1 for predictable memory; only raise it if the GPU is sized for it.",
+          "default": "1",
           "advanced": true
         }
       }

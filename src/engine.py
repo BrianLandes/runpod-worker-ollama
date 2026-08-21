@@ -12,6 +12,47 @@ client = OpenAI(
     api_key='ollama',
 )
 
+# Sampling params the OpenAI SDK accepts as named keyword arguments. Anything
+# outside this set must ride in `extra_body` instead: the SDK raises
+# `TypeError: got an unexpected keyword argument 'top_k'` rather than passing an
+# unknown kwarg through, which would fail the whole job over a param the caller
+# merely hoped for.
+#
+# Caveat worth knowing: Ollama's OpenAI-compatible layer accepts unknown JSON
+# fields and ignores them. `temperature`, `top_p` and `max_tokens` genuinely take
+# effect; `top_k` / `repeat_penalty` reach Ollama via extra_body but are NOT
+# implemented on this route, so they are a silent no-op rather than an error.
+# Context size is likewise not settable per request — it comes from the
+# server-wide OLLAMA_CONTEXT_LENGTH env var (see the Dockerfile).
+_OPENAI_NAMED_PARAMS = frozenset({
+    "max_tokens", "max_completion_tokens", "temperature", "top_p", "seed",
+    "stop", "n", "frequency_penalty", "presence_penalty", "logit_bias",
+    "logprobs", "top_logprobs", "response_format", "user",
+})
+
+
+def _apply_sampling(openai_input, sampling_params):
+    """Merge caller sampling params into an OpenAI request body.
+
+    Known params go in as named fields, the rest into `extra_body` so the SDK
+    forwards them without choking. Never overwrites a value the caller already
+    set explicitly in `openai_input`.
+    """
+    if not sampling_params:
+        return openai_input
+    extra = dict(openai_input.get("extra_body") or {})
+    for key, value in sampling_params.items():
+        if key in openai_input:
+            continue
+        if key in _OPENAI_NAMED_PARAMS:
+            openai_input[key] = value
+        else:
+            extra.setdefault(key, value)
+    if extra:
+        openai_input["extra_body"] = extra
+    return openai_input
+
+
 class OllamaEngine:
     def __init__(self):
         load_dotenv()
@@ -26,26 +67,30 @@ class OllamaEngine:
             yield {"error": "OLLAMA_MODEL_NAME is not set; it is baked into the image at build time."}
             return
 
-        # Depending if prompt is a string or a list, we need to handle it differently and send it to the OpenAI API
+        # Depending if prompt is a string or a list, we need to handle it differently and send it to the OpenAI API.
+        # `_apply_sampling` carries the caller's max_tokens / temperature / top_p
+        # across; without it this rebuild silently discarded every sampling param
+        # the caller sent, so requests asking for deterministic output got the
+        # model default instead and generation ran with no token ceiling.
         if isinstance(job_input.llm_input, str):
             # Buid new JobInput object with the OpenAI route and input
             openAiJob = JobInput({
                 "openai_route": "/v1/completions",
-                "openai_input": {
+                "openai_input": _apply_sampling({
                     "model": model,
                     "prompt": job_input.llm_input,
                     "stream": job_input.stream
-                }
+                }, job_input.sampling_params)
             })
         else:
             # Buid new JobInput object with the OpenAI route and input
             openAiJob = JobInput({
                 "openai_route": "/v1/chat/completions",
-                "openai_input": {
+                "openai_input": _apply_sampling({
                     "model": model,
                     "messages": job_input.llm_input,
                     "stream": job_input.stream
-                }
+                }, job_input.sampling_params)
             })
 
         print ("Generating response for job_input:", job_input)
