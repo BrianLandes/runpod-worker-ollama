@@ -38,11 +38,13 @@ Edit whatever you need under [`src/`](./src) (handler/engine/startup) or config.
 **Do not reuse the same tag.** RunPod (and Docker) cache by tag, so pushing over an existing
 tag often won't roll out reliably. Bump the version each rebuild.
 
-This repo currently uses `0.1.0`. For the next build pick the next number, e.g. `0.1.1`.
+Tags so far: `0.1.0`, `0.2.0`, `0.2.1` (live since 2026-08-21), **`0.3.0`** (structured output, 2026-10-06 — see
+below). Pick the next number after the last one you pushed (`docker images brianlandes/runpod-worker-ollama` lists
+what you've built).
 
 ```bash
 # set this once per rebuild — used by the commands below
-export TAG=0.1.1
+export TAG=0.3.0
 ```
 
 ---
@@ -160,6 +162,15 @@ the job input through to Ollama. **Before 0.1.1 it discarded all of them**, keep
 `top_k` and `repeat_penalty` are forwarded via `extra_body` but Ollama's OpenAI-compat layer
 does not implement them — accepted and ignored, not an error. Use `temperature` / `top_p`.
 
+### Structured output — a JSON schema (worker ≥ 0.3.0)
+
+A `{"prompt": …}` job may carry `"format": <JSON schema>` (or `"json"`). The worker then calls Ollama's **native**
+`/api/generate` with that `format`, which constrains decoding to the schema, and answers in the usual
+`/v1/completions` shape (`choices[0].text`, `usage`, plus `"native": true`). Sampling params map to Ollama options
+(`max_tokens` → `num_predict`; `top_k` / `repeat_penalty` DO take effect on this route). Jobs without `format` go
+through the OpenAI-compatible route exactly as before. Why: `/v1/completions` accepts a `response_format` and
+silently ignores it. The game (Alsion) sends `format` only when `ALSION_RUNPOD_SCHEMA=1`.
+
 > **Remove** any `OLLAMA_MODEL_NAME` / `OLLAMA_EXTRA_MODELS` left over from an older deploy —
 > they no longer do anything at runtime and just mislead.
 
@@ -184,6 +195,15 @@ curl -s https://api.runpod.ai/v2/<ENDPOINT_ID>/runsync \
   -H "Authorization: Bearer <RUNPOD_API_KEY>" \
   -H "Content-Type: application/json" \
   -d '{"input":{"openai_route":"/v1/chat/completions","openai_input":{"model":"hf.co/TheDrummer/Cydonia-24B-v4.3-GGUF:Q4_K_M","messages":[{"role":"user","content":"How are you?"}]}}}'
+```
+
+**Structured output (≥ 0.3.0)** — expect `"text": "{\"body\": \"zq-alpha\"}"` (or zq-beta) and `"native": true`;
+an older image answers free-form instead:
+```bash
+curl -s https://api.runpod.ai/v2/<ENDPOINT_ID>/runsync \
+  -H "Authorization: Bearer <RUNPOD_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"prompt":"Isla is lying on her back. Describe her body in one word as JSON {\"body\": ...}.","max_tokens":50,"temperature":0.1,"format":{"type":"object","properties":{"body":{"type":"string","enum":["zq-alpha","zq-beta"]}},"required":["body"]}}}'
 ```
 
 **Embeddings:**

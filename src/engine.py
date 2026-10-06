@@ -67,6 +67,12 @@ class OllamaEngine:
             yield {"error": "OLLAMA_MODEL_NAME is not set; it is baked into the image at build time."}
             return
 
+        # A string prompt with an output schema: Ollama's native /api/generate, which constrains decoding to the
+        # schema. The OpenAI-compatible route below accepts `response_format` on /v1/completions and ignores it.
+        if isinstance(job_input.llm_input, str) and job_input.format is not None:
+            yield self._native_generate(model, job_input)
+            return
+
         # Depending if prompt is a string or a list, we need to handle it differently and send it to the OpenAI API.
         # `_apply_sampling` carries the caller's max_tokens / temperature / top_p
         # across; without it this rebuild silently discarded every sampling param
@@ -103,6 +109,35 @@ class OllamaEngine:
         # Yield the response from the OpenAI API
         async for batch in generate:
             yield batch
+
+    # Sampling params → Ollama `options` names on the native route (it implements top_k / repeat_penalty too).
+    _NATIVE_OPTIONS = {"temperature": "temperature", "top_p": "top_p", "top_k": "top_k", "seed": "seed",
+                       "stop": "stop", "max_tokens": "num_predict", "repeat_penalty": "repeat_penalty",
+                       "frequency_penalty": "frequency_penalty", "presence_penalty": "presence_penalty"}
+
+    def _native_generate(self, model, job_input):
+        """One non-streaming /api/generate call with `format`, answered in the /v1/completions shape callers
+        already read: {"choices": [{"text", "finish_reason"}], "usage": {prompt_tokens, completion_tokens}}."""
+        import urllib.request
+        params = job_input.sampling_params or {}
+        options = {self._NATIVE_OPTIONS[k]: v for k, v in params.items() if k in self._NATIVE_OPTIONS}
+        body = {"model": model, "prompt": job_input.llm_input, "stream": False, "format": job_input.format,
+                "options": options}
+        base = os.getenv("OLLAMA_NATIVE_URL", "http://localhost:11434")
+        try:
+            req = urllib.request.Request(f"{base}/api/generate", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=600) as r:
+                d = json.loads(r.read())
+        except Exception as e:
+            return {"error": str(e)}
+        if "error" in d:
+            return {"error": d["error"]}
+        return {"object": "text_completion", "model": model, "native": True,
+                "choices": [{"index": 0, "text": d.get("response", ""),
+                             "finish_reason": "length" if d.get("done_reason") == "length" else "stop"}],
+                "usage": {"prompt_tokens": d.get("prompt_eval_count"), "completion_tokens": d.get("eval_count")}}
+
 
 class OllamaOpenAiEngine(OllamaEngine):
     def __init__(self):
