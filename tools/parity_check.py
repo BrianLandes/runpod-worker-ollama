@@ -3,7 +3,7 @@
 
     python tools/parity_check.py [http://localhost:11434] [model]
 
-Every case should print SAME. The no-temperature case is the one that matters most: Alsion's main narrative call
+Every case should print SAME (each side runs three times; see RUNS). The no-temperature case is the one that matters most: Alsion's main narrative call
 sends no temperature or top_p, so the native path must reproduce the OpenAI layer's defaults. A DIFF means
 _COMPAT_DEFAULTS no longer match this Ollama version — ship with OLLAMA_NATIVE_COMPLETIONS=0 until fixed.
 """
@@ -37,19 +37,25 @@ CASES = [
     ("Count: one, two,", {"temperature": 0.7, "max_tokens": 20, "seed": 5, "stop": ["five"]}),
 ]
 
+# A seeded call is NOT always reproducible on the GPU: at temperature ~1, /v1/completions itself gave two different
+# texts in three identical runs (Ollama 0.35.1, 2026-10-09). So each side runs RUNS times and a case passes when the
+# two sets of texts overlap; with the model's own defaults instead of the compat ones they never did.
+RUNS = 3
+
 failed = 0
 for prompt, params in CASES:
     # What the OpenAI route receives: top_k / repeat_penalty ride in the body and are ignored there.
-    a = post("/v1/completions", {"model": MODEL, "prompt": prompt, **params})
-    b = post("/api/generate", {"model": MODEL, "prompt": prompt, "stream": False,
-                               "options": _compat_options(params)})
-    ta, tb = a["choices"][0]["text"], b["response"]
-    same = ta == tb
+    a = {post("/v1/completions", {"model": MODEL, "prompt": prompt, **params})["choices"][0]["text"]
+         for _ in range(RUNS)}
+    b = {post("/api/generate", {"model": MODEL, "prompt": prompt, "stream": False,
+                                "options": _compat_options(params)})["response"] for _ in range(RUNS)}
+    same = bool(a & b)
     failed += not same
-    print("SAME" if same else "DIFF", json.dumps(params))
+    noisy = f"  (run-to-run noise: /v1 {len(a)} distinct, native {len(b)})" if len(a) > 1 or len(b) > 1 else ""
+    print("SAME" if same else "DIFF", json.dumps(params) + noisy)
     if not same:
-        print("   /v1  :", repr(ta[:120]))
-        print("   /api :", repr(tb[:120]))
+        print("   /v1  :", [t[:100] for t in a])
+        print("   /api :", [t[:100] for t in b])
 
 e1 = post("/v1/embeddings", {"model": "nomic-embed-text", "input": "The quick brown fox"})
 e2 = post("/api/embed", {"model": "nomic-embed-text", "input": "The quick brown fox"})
