@@ -1,16 +1,84 @@
+import asyncio
 import json
 import os
+import urllib.request
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 from utils import JobInput
 
-client = OpenAI(
+# Async on purpose. The handler runs up to MAX_CONCURRENCY jobs on ONE event loop, and before 0.4.0 this was the
+# sync `OpenAI` client: every Ollama call blocked the loop, so a 119-token embed picked up beside an 8 s generation
+# sat out the whole 8 s — and RunPod billed and reported that wait as the embed's executionTime. Nothing in this
+# file may block the loop; the native routes go through `_post_native` (urllib in a thread).
+client = AsyncOpenAI(
     base_url='http://localhost:11434/v1/',
 
     # required but ignored
     api_key='ollama',
 )
+
+OLLAMA_NATIVE_URL = os.getenv("OLLAMA_NATIVE_URL", "http://localhost:11434")
+
+# Ollama's own timings (nanoseconds), forwarded in `usage` so a caller can split a job's executionTime into model
+# load / prompt eval (prefill) / eval (decode), and the rest into waiting. Only the native routes report them —
+# the OpenAI-compatible routes return token counts and nothing else.
+_TIMING_FIELDS = ("total_duration", "load_duration", "prompt_eval_duration", "eval_duration")
+
+
+def _timings(d):
+    return {k: d[k] for k in _TIMING_FIELDS if d.get(k) is not None}
+
+
+async def _post_native(path, body):
+    """POST to Ollama's native API without blocking the event loop. Raises on an HTTP or connection error."""
+    def call():
+        req = urllib.request.Request(f"{OLLAMA_NATIVE_URL}{path}", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return json.loads(r.read())
+    return await asyncio.to_thread(call)
+
+
+def _completion_shape(model, d):
+    """A native /api/generate answer in the /v1/completions shape callers read, plus Ollama's timings."""
+    return {"object": "text_completion", "model": model, "native": True,
+            "choices": [{"index": 0, "text": d.get("response", ""),
+                         "finish_reason": "length" if d.get("done_reason") == "length" else "stop"}],
+            "usage": {"prompt_tokens": d.get("prompt_eval_count"), "completion_tokens": d.get("eval_count"),
+                      **_timings(d)}}
+
+
+# A plain {"prompt": ...} job is served on the native /api/generate (for the timings) with the options Ollama itself
+# builds from a /v1/completions request, so the output is what the OpenAI route would have given:
+# - unset temperature / top_p are OpenAI's 1.0, not the model's defaults; unset penalties are 0;
+# - top_k and repeat_penalty are DROPPED — the OpenAI route ignores them, and honouring them now would quietly
+#   change the sampling of every caller that sends them (Alsion's conservative and diverse sets do);
+# - a job carrying any other param (logprobs, suffix, n, …) keeps the OpenAI route.
+# OLLAMA_NATIVE_COMPLETIONS=0 puts every plain prompt back on the OpenAI route.
+_COMPAT_OPTIONS = {"max_tokens": "num_predict", "max_completion_tokens": "num_predict",
+                   "temperature": "temperature", "top_p": "top_p", "seed": "seed", "stop": "stop",
+                   "frequency_penalty": "frequency_penalty", "presence_penalty": "presence_penalty"}
+_COMPAT_IGNORED = frozenset({"top_k", "repeat_penalty"})
+_COMPAT_DEFAULTS = {"temperature": 1.0, "top_p": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}
+
+
+def _compat_options(params):
+    """Ollama options equivalent to a /v1/completions request with `params`, or None if a param has no
+    equivalent (the job then keeps the OpenAI route)."""
+    if any(k not in _COMPAT_OPTIONS and k not in _COMPAT_IGNORED for k in params):
+        return None
+    options = dict(_COMPAT_DEFAULTS)
+    for key, value in params.items():
+        if key in _COMPAT_OPTIONS:
+            options[_COMPAT_OPTIONS[key]] = value
+    if isinstance(options.get("stop"), str):
+        options["stop"] = [options["stop"]]
+    return options
+
+
+def _native_completions_enabled():
+    return os.getenv("OLLAMA_NATIVE_COMPLETIONS", "1").strip().lower() not in ("0", "false", "no", "off")
 
 # Sampling params the OpenAI SDK accepts as named keyword arguments. Anything
 # outside this set must ride in `extra_body` instead: the SDK raises
@@ -70,8 +138,15 @@ class OllamaEngine:
         # A string prompt with an output schema: Ollama's native /api/generate, which constrains decoding to the
         # schema. The OpenAI-compatible route below accepts `response_format` on /v1/completions and ignores it.
         if isinstance(job_input.llm_input, str) and job_input.format is not None:
-            yield self._native_generate(model, job_input)
+            yield await self._native_generate(model, job_input)
             return
+
+        # A plain non-streaming prompt: the native route with OpenAI-equivalent options, for Ollama's timings.
+        if isinstance(job_input.llm_input, str) and not job_input.stream and _native_completions_enabled():
+            options = _compat_options(job_input.sampling_params or {})
+            if options is not None:
+                yield await self._native_compat_generate(model, job_input.llm_input, options)
+                return
 
         # Depending if prompt is a string or a list, we need to handle it differently and send it to the OpenAI API.
         # `_apply_sampling` carries the caller's max_tokens / temperature / top_p
@@ -115,28 +190,31 @@ class OllamaEngine:
                        "stop": "stop", "max_tokens": "num_predict", "repeat_penalty": "repeat_penalty",
                        "frequency_penalty": "frequency_penalty", "presence_penalty": "presence_penalty"}
 
-    def _native_generate(self, model, job_input):
+    async def _native_generate(self, model, job_input):
         """One non-streaming /api/generate call with `format`, answered in the /v1/completions shape callers
-        already read: {"choices": [{"text", "finish_reason"}], "usage": {prompt_tokens, completion_tokens}}."""
-        import urllib.request
+        already read: {"choices": [{"text", "finish_reason"}], "usage": {prompt_tokens, completion_tokens, …}}."""
         params = job_input.sampling_params or {}
         options = {self._NATIVE_OPTIONS[k]: v for k, v in params.items() if k in self._NATIVE_OPTIONS}
         body = {"model": model, "prompt": job_input.llm_input, "stream": False, "format": job_input.format,
                 "options": options}
-        base = os.getenv("OLLAMA_NATIVE_URL", "http://localhost:11434")
         try:
-            req = urllib.request.Request(f"{base}/api/generate", data=json.dumps(body).encode(),
-                                         headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=600) as r:
-                d = json.loads(r.read())
+            d = await _post_native("/api/generate", body)
         except Exception as e:
             return {"error": str(e)}
         if "error" in d:
             return {"error": d["error"]}
-        return {"object": "text_completion", "model": model, "native": True,
-                "choices": [{"index": 0, "text": d.get("response", ""),
-                             "finish_reason": "length" if d.get("done_reason") == "length" else "stop"}],
-                "usage": {"prompt_tokens": d.get("prompt_eval_count"), "completion_tokens": d.get("eval_count")}}
+        return _completion_shape(model, d)
+
+    async def _native_compat_generate(self, model, prompt, options):
+        """A plain prompt on /api/generate with the options /v1/completions would have used (see _compat_options)."""
+        try:
+            d = await _post_native("/api/generate", {"model": model, "prompt": prompt, "stream": False,
+                                                     "options": options})
+        except Exception as e:
+            return {"error": str(e)}
+        if "error" in d:
+            return {"error": d["error"]}
+        return _completion_shape(model, d)
 
 
 class OllamaOpenAiEngine(OllamaEngine):
@@ -166,18 +244,38 @@ class OllamaOpenAiEngine(OllamaEngine):
 
     async def _handle_model_request(self):
         try:
-            response = client.models.list()
+            response = await client.models.list()
             # build a json response from the response object
             # SyncPage[Model](data=[Model(id='llama3.2:1b', created=1737206544, object='model', owned_by='library')], object='list')\n
             yield {"object": "list", "data": [model.to_dict() for model in response.data]} 
         except Exception as e:
             yield {"error": str(e)}
 
+    # /v1/embeddings fields the native /api/embed takes as-is (Ollama's OpenAI layer converts to the same request).
+    _NATIVE_EMBED_KEYS = frozenset({"model", "input", "dimensions", "encoding_format", "user"})
+
     async def _handle_embeddings_request(self, openai_input):
+        # Embeddings are non-streaming; the caller supplies "model" and "input"
+        # in openai_input, e.g. {"model": "nomic-embed-text", "input": "hello"}.
+        # Served on the native /api/embed — same vectors, plus load_duration / total_duration, which say whether
+        # this embed had to load its model. A request the native route can't express keeps the OpenAI route.
         try:
-            # Embeddings are non-streaming; the caller supplies "model" and "input"
-            # in openai_input, e.g. {"model": "nomic-embed-text", "input": "hello"}
-            response = client.embeddings.create(**openai_input)
+            if (set(openai_input) <= self._NATIVE_EMBED_KEYS
+                    and openai_input.get("encoding_format", "float") == "float"):
+                body = {"model": openai_input["model"], "input": openai_input["input"]}
+                if openai_input.get("dimensions"):
+                    body["dimensions"] = openai_input["dimensions"]
+                d = await _post_native("/api/embed", body)
+                if "error" in d:
+                    yield {"error": d["error"]}
+                    return
+                n = d.get("prompt_eval_count")
+                yield {"object": "list", "model": openai_input["model"], "native": True,
+                       "data": [{"object": "embedding", "index": i, "embedding": e}
+                                for i, e in enumerate(d.get("embeddings") or [])],
+                       "usage": {"prompt_tokens": n, "total_tokens": n, **_timings(d)}}
+                return
+            response = await client.embeddings.create(**openai_input)
             yield response.to_dict()
         except Exception as e:
             yield {"error": str(e)}
@@ -186,16 +284,16 @@ class OllamaOpenAiEngine(OllamaEngine):
         try:
             # Call openai.chat.completions.create or openai.completions.create based on the route
             if chat:
-                response = client.chat.completions.create(**openai_input)
+                response = await client.chat.completions.create(**openai_input)
             else:
-                response = client.completions.create(**openai_input)
+                response = await client.completions.create(**openai_input)
 
             # If streaming is False, we can just return the response
             if not openai_input.get("stream", False):
                 yield response.to_dict()
                 return
 
-            for chunk in response:
+            async for chunk in response:
                 # Log message to console
                 print("Message:", chunk)
                 # Return json of the chunk without any line breaks

@@ -31,4 +31,17 @@ while ! check_server_is_running; do
 done
 
 # Models are baked into the image at build time (see Dockerfile) — no runtime pull.
+# Load both now, before the handler takes a job, so no job's executionTime carries a model load. A failed
+# preload is logged and ignored: the first job then loads the model as before.
+EMBED_MODEL_NAME=${EMBED_MODEL_NAME:-nomic-embed-text}
+echo "Preloading $OLLAMA_MODEL_NAME and $EMBED_MODEL_NAME..."
+curl -s -m 300 http://localhost:11434/api/generate \
+    -d "{\"model\": \"$OLLAMA_MODEL_NAME\", \"keep_alive\": -1}" > /dev/null || echo "Preload of $OLLAMA_MODEL_NAME failed"
+curl -s -m 120 http://localhost:11434/api/embed \
+    -d "{\"model\": \"$EMBED_MODEL_NAME\", \"input\": \"warm\", \"keep_alive\": -1}" > /dev/null \
+    || echo "Preload of $EMBED_MODEL_NAME failed"
+# Both should be listed here at 100% GPU. One missing, or a CPU/GPU split, means the GPU is too small for both.
+ollama ps
+nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv 2>/dev/null
+
 python -u handler.py $1

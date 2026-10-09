@@ -81,6 +81,24 @@ ENV OLLAMA_CONTEXT_LENGTH=8192
 # concurrency and have sized the GPU for it.
 ENV OLLAMA_NUM_PARALLEL=1
 
+# --- Keep both models resident ---
+# Every embed rides this worker beside the text model. If Ollama ever unloads one to serve the other, each embed
+# turns into a model load (a cold Cydonia load measured 14.6 s locally). On a 24 GB card both fit at once
+# (Cydonia ~14.6 GiB at 8192 + nomic-embed ~0.8 GiB), so pin it:
+#   MAX_LOADED_MODELS=2 — both may be resident (Ollama's default is 3 per GPU; pinned so it is explicit);
+#   KEEP_ALIVE=-1       — never unload on idle. The default 5m dropped nomic after a quiet spell, and the next
+#                          embed paid the load. The worker is the only tenant; its idle timeout ends it anyway.
+# start.sh also loads both before the handler takes a job, and logs `ollama ps` — the RunPod log then shows
+# whether both are resident on whatever GPU the endpoint landed on. On a 16-20 GB card they are NOT both
+# resident and every model switch is a reload: keep the endpoint on 24 GB GPUs.
+ENV OLLAMA_MAX_LOADED_MODELS=2
+ENV OLLAMA_KEEP_ALIVE=-1
+ENV EMBED_MODEL_NAME=${EMBED_MODEL}
+
+# Flash attention: faster prefill on long prompts and a smaller KV cache. Recent Ollama starts its runners with
+# `--flash-attn auto` (seen on 0.35.1 locally), so this may already be on; pinned so it can't silently be off.
+ENV OLLAMA_FLASH_ATTENTION=1
+
 # Set the working directory
 WORKDIR /work
 

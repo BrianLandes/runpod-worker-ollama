@@ -38,13 +38,13 @@ Edit whatever you need under [`src/`](./src) (handler/engine/startup) or config.
 **Do not reuse the same tag.** RunPod (and Docker) cache by tag, so pushing over an existing
 tag often won't roll out reliably. Bump the version each rebuild.
 
-Tags so far: `0.1.0`, `0.2.0`, `0.2.1` (live since 2026-08-21), **`0.3.0`** (structured output, 2026-10-06 — see
-below). Pick the next number after the last one you pushed (`docker images brianlandes/runpod-worker-ollama` lists
+Tags so far: `0.1.0`, `0.2.0`, `0.2.1` (live since 2026-08-21), `0.3.0` (structured output, 2026-10-06), **`0.4.0`**
+(non-blocking jobs, Ollama timings, both models resident, 2026-10-09 — see below). Pick the next number after the last one you pushed (`docker images brianlandes/runpod-worker-ollama` lists
 what you've built).
 
 ```bash
 # set this once per rebuild — used by the commands below
-export TAG=0.3.0
+export TAG=0.4.0
 ```
 
 ---
@@ -170,6 +170,29 @@ A `{"prompt": …}` job may carry `"format": <JSON schema>` (or `"json"`). The w
 (`max_tokens` → `num_predict`; `top_k` / `repeat_penalty` DO take effect on this route). Jobs without `format` go
 through the OpenAI-compatible route exactly as before. Why: `/v1/completions` accepts a `response_format` and
 silently ignores it. The game (Alsion) sends `format` only when `ALSION_RUNPOD_SCHEMA=1`.
+
+### Concurrency, timings and resident models (worker ≥ 0.4.0)
+
+- **Jobs no longer block each other.** Before 0.4.0 the handler called Ollama with the *synchronous* OpenAI client
+  inside its async handler, so with `MAX_CONCURRENCY=8` a worker ran its jobs one at a time at the Python level: an
+  embed picked up beside an 8 s generation waited the whole 8 s, and RunPod billed and reported that wait as the
+  embed's `executionTime`. (Reproduced against a fake Ollama: old engine, embed beside a 2 s generation = 2.25 s;
+  0.4.0 = 0.00 s.) Ollama still serves one text generation at a time (`OLLAMA_NUM_PARALLEL=1`), but embeds run on
+  their own runner and no longer queue behind it.
+- **Ollama's timings come back in `usage`** — `total_duration`, `load_duration`, `prompt_eval_duration`,
+  `eval_duration` (nanoseconds, Ollama's names). Only Ollama's native routes report them, so:
+  - a plain non-streaming `{"prompt": …}` job is served on `/api/generate` with the options Ollama itself builds
+    from `/v1/completions` (unset temperature / top_p = 1.0, penalties 0; `top_k` / `repeat_penalty` **dropped**,
+    as the OpenAI route ignores them). Any other param (`logprobs`, `n`, …) keeps the OpenAI route.
+    `OLLAMA_NATIVE_COMPLETIONS=0` on the endpoint puts every plain prompt back on the OpenAI route.
+  - `/v1/embeddings` is served on `/api/embed` (same vectors) and answered in the OpenAI shape.
+  - chat (`messages`) and streaming jobs are unchanged and report no timings.
+  A job's `executionTime − total_duration` is time it spent waiting on the worker; `load_duration` > ~0.1 s on an
+  embed means it paid a model load.
+- **Both models stay resident:** `OLLAMA_MAX_LOADED_MODELS=2`, `OLLAMA_KEEP_ALIVE=-1`, and `start.sh` loads both
+  before the handler takes a job, then logs `ollama ps` + `nvidia-smi`. Check a fresh worker's log: both models
+  listed, `100% GPU`. If one is missing, the endpoint landed on a GPU too small for both — pin it to 24 GB classes.
+- `OLLAMA_FLASH_ATTENTION=1` is pinned (recent Ollama already runs with `--flash-attn auto`).
 
 > **Remove** any `OLLAMA_MODEL_NAME` / `OLLAMA_EXTRA_MODELS` left over from an older deploy —
 > they no longer do anything at runtime and just mislead.

@@ -16,6 +16,10 @@ A mounted volume will be automatically used.
 | `OLLAMA_CONTEXT_LENGTH` | Context window in tokens. **Ollama's own default of 4096 silently discards the front of any longer prompt** rather than erroring, and this cannot be overridden per request on the OpenAI routes. Costs preallocated VRAM. | `8192`        |
 | `OLLAMA_NUM_PARALLEL`   | Ollama slots served concurrently. KV cache = context length × this, so raising it multiplies VRAM. Pinned for predictable memory. | `1`           |
 | `MAX_CONCURRENCY`       | Max concurrent requests the handler accepts                                                | `8`           |
+| `OLLAMA_MAX_LOADED_MODELS` | Models resident at once. Pinned so the text and embed models never evict each other.   | `2`           |
+| `OLLAMA_KEEP_ALIVE`     | How long an idle model stays loaded. `-1` = for the worker's life.                         | `-1`          |
+| `OLLAMA_FLASH_ATTENTION`| Flash attention for the runners.                                                           | `1`           |
+| `OLLAMA_NATIVE_COMPLETIONS` | `0` serves plain prompts on the OpenAI route again (no timings in `usage`).            | `1`           |
 
 > This fork **bakes** the models into the image at build time (see [`Dockerfile`](./Dockerfile)),
 > so `OLLAMA_MODEL_NAME` / `OLLAMA_EXTRA_MODELS` are build-time `ARG`s rather than runtime
