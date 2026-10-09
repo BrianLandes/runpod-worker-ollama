@@ -39,7 +39,9 @@ Edit whatever you need under [`src/`](./src) (handler/engine/startup) or config.
 tag often won't roll out reliably. Bump the version each rebuild.
 
 Tags so far: `0.1.0`, `0.2.0`, `0.2.1` (live since 2026-08-21), `0.3.0` (structured output, 2026-10-06), **`0.4.0`**
-(non-blocking jobs, Ollama timings, both models resident, 2026-10-09 — see below). Pick the next number after the last one you pushed (`docker images brianlandes/runpod-worker-ollama` lists
+(non-blocking jobs, Ollama timings, both models resident — live since 2026-10-09; `tools/parity_check.py` all SAME
+against the built image before deploy). Before a deploy that touches the request path, run
+`python tools/parity_check.py <ollama url>` against the new image — see the "Concurrency, timings" section. Pick the next number after the last one you pushed (`docker images brianlandes/runpod-worker-ollama` lists
 what you've built).
 
 ```bash
@@ -193,6 +195,20 @@ silently ignores it. The game (Alsion) sends `format` only when `ALSION_RUNPOD_S
   before the handler takes a job, then logs `ollama ps` + `nvidia-smi`. Check a fresh worker's log: both models
   listed, `100% GPU`. If one is missing, the endpoint landed on a GPU too small for both — pin it to 24 GB classes.
 - `OLLAMA_FLASH_ATTENTION=1` is pinned (recent Ollama already runs with `--flash-attn auto`).
+
+**Pre-deploy parity check** — the build machine's Docker has no NVIDIA runtime, so this runs the image's Ollama on
+CPU (slow, ~10–20 min, but the check is about option mapping, not speed). It uses `src/engine.py`'s real mapping:
+
+```bash
+docker run -d --name parity-check -p 11435:11434 --entrypoint ollama brianlandes/runpod-worker-ollama:$TAG serve
+until curl -s localhost:11435/api/version; do sleep 2; done; echo
+python tools/parity_check.py http://localhost:11435     # every line SAME
+docker rm -f parity-check
+```
+
+Only the no-temperature case DIFF → that Ollama's OpenAI defaults moved: deploy with `OLLAMA_NATIVE_COMPLETIONS=0`.
+Embeddings DIFF → don't deploy. Each side runs three times because a seeded temperature-1 call is not always
+reproducible on a GPU. The first `docker run` of a fresh tag unpacks ~18 GB and saturates the disk for a while.
 
 > **Remove** any `OLLAMA_MODEL_NAME` / `OLLAMA_EXTRA_MODELS` left over from an older deploy —
 > they no longer do anything at runtime and just mislead.
