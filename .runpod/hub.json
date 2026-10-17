@@ -36,8 +36,18 @@
         "input": {
           "name": "Parallel Requests",
           "type": "string",
-          "description": "Ollama slots served concurrently. KV cache is OLLAMA_CONTEXT_LENGTH x this, so raising it multiplies VRAM. Image pins it to 1 for predictable memory; only raise it if the GPU is sized for it.",
-          "default": "1",
+          "description": "Ollama slots served concurrently (image default 2 since 0.4.1). A turn's passes are fired together; at 1 they queue inside Ollama. KV cache is OLLAMA_CONTEXT_LENGTH x this \u2014 at q8_0 (OLLAMA_KV_CACHE_TYPE) 8192 x 2 is ~1.25 GiB, x 4 ~2.5 GiB, on ~13.9 GiB of weights. Keep the endpoint on 24 GB GPUs.",
+          "default": "2",
+          "advanced": true
+        }
+      },
+      {
+        "key": "OLLAMA_KV_CACHE_TYPE",
+        "input": {
+          "name": "KV Cache Type",
+          "type": "string",
+          "description": "f16 | q8_0 | q4_0. Image default q8_0 since 0.4.1: half the f16 cache, so two parallel slots cost what one did. Needs flash attention (pinned on). q4_0 is not recommended.",
+          "default": "q8_0",
           "advanced": true
         }
       }

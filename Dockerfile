@@ -77,9 +77,21 @@ ENV OLLAMA_CONTEXT_LENGTH=8192
 # and picks the parallelism itself when unset (up to 4). Left to its own devices
 # that quietly multiplies the figures above by 4 — 8192 x 4 = 5 GiB of KV — which
 # is how raising the context turns into an out-of-memory on cold start. Pin it so
-# the memory math is predictable; override on the endpoint if you want
-# concurrency and have sized the GPU for it.
-ENV OLLAMA_NUM_PARALLEL=1
+# the memory math is predictable.
+#
+# 2 since 0.4.1 (2026-10-17). At 1, the caller's turn — ~10 passes fired together after every narrated beat —
+# queued INSIDE Ollama: production timings 2026-10-16/17 put 213 s of execution against 120 s of real GPU work per
+# beat, and decode (2/3 of the GPU time) is memory-bandwidth bound, so two sequences decoding together cost little
+# more than one. Measure busy vs queued from the caller's timing_events before going to 4
+# (alsion: docs/turn-cost-review-2026-10-17.md, docs/llm-call-practices.md).
+ENV OLLAMA_NUM_PARALLEL=2
+
+# KV cache at 8-bit (needs flash attention, pinned on below): half the f16 cache for a near-invisible quality
+# change, so 2 slots cost what 1 did. At 8192 context, Cydonia-24B, with nomic-embed resident (~0.8 GiB):
+#   1 slot f16  +1.25 GiB  (~16.0 total)    2 slots q8_0 +1.25 GiB (~16.0 total)
+#   4 slots q8_0 +2.5 GiB  (~17.2 total)    4 slots f16  +5.0 GiB  (~19.7 total)
+# Run tools/parity_check.py against the built image before deploying (DEPLOY.md).
+ENV OLLAMA_KV_CACHE_TYPE=q8_0
 
 # --- Keep both models resident ---
 # Every embed rides this worker beside the text model. If Ollama ever unloads one to serve the other, each embed

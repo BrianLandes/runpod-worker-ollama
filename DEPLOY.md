@@ -40,13 +40,14 @@ tag often won't roll out reliably. Bump the version each rebuild.
 
 Tags so far: `0.1.0`, `0.2.0`, `0.2.1` (live since 2026-08-21), `0.3.0` (structured output, 2026-10-06), **`0.4.0`**
 (non-blocking jobs, Ollama timings, both models resident — live since 2026-10-09; `tools/parity_check.py` all SAME
-against the built image before deploy). Before a deploy that touches the request path, run
+against the built image before deploy), **`0.4.1`** (2026-10-17, built from source but not yet pushed:
+`OLLAMA_NUM_PARALLEL=2` and `OLLAMA_KV_CACHE_TYPE=q8_0` — see "Concurrency, timings" below). Before a deploy that touches the request path, run
 `python tools/parity_check.py <ollama url>` against the new image — see the "Concurrency, timings" section. Pick the next number after the last one you pushed (`docker images brianlandes/runpod-worker-ollama` lists
 what you've built).
 
 ```bash
 # set this once per rebuild — used by the commands below
-export TAG=0.4.0
+export TAG=0.4.1
 ```
 
 ---
@@ -172,6 +173,22 @@ A `{"prompt": …}` job may carry `"format": <JSON schema>` (or `"json"`). The w
 (`max_tokens` → `num_predict`; `top_k` / `repeat_penalty` DO take effect on this route). Jobs without `format` go
 through the OpenAI-compatible route exactly as before. Why: `/v1/completions` accepts a `response_format` and
 silently ignores it. The game (Alsion) sends `format` only when `ALSION_RUNPOD_SCHEMA=1`.
+
+### Two parallel slots and an 8-bit KV cache (worker ≥ 0.4.1, 2026-10-17)
+
+- **Why.** The caller fires ~10 passes together after every narrated beat. With `OLLAMA_NUM_PARALLEL=1` they ran one
+  at a time inside Ollama: production timings (the caller's `timing_events`, 2026-10-16/17) showed 213 s of execution
+  per beat against 120 s of GPU work. Decode is two thirds of that work and is memory-bandwidth bound, so two
+  sequences decoding together cost little more than one — fewer billed seconds AND a shorter turn.
+- **Memory.** q8_0 halves the KV cache, so 2 slots at 8192 cost what 1 did at f16 (~1.25 GiB; ~16 GiB in all with
+  the embed model). 4 slots at q8_0 ~17.2 GiB.
+- **Endpoint env overrides the image.** If the endpoint sets `OLLAMA_NUM_PARALLEL=1` in the console, the new
+  default never applies — set `OLLAMA_NUM_PARALLEL=2` and `OLLAMA_KV_CACHE_TYPE=q8_0` there (or delete the
+  overrides).
+- **Before and after.** Per beat from the caller's `timing_events`: Σ(prefill + decode + load) (GPU work) against
+  Σ exec (work + queue), and the reconciled $/busy-GPU-hour. Then try 4 slots with the same measurement.
+- **Check quality first:** `python tools/parity_check.py <ollama url>` against the built image — q8_0 changes the
+  numbers the model attends with; it should read SAME.
 
 ### Concurrency, timings and resident models (worker ≥ 0.4.0)
 
